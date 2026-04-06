@@ -1,0 +1,5 @@
+pyside6-essentials ~= 6.10.2
+pywin32 == 311
+maya-stubs ~= 0.4
+
+# pip install -r requirements.txt
