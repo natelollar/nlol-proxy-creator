@@ -8,10 +8,12 @@ from pathlib import Path
 
 import win32com.client
 from proxy_creator_logger import get_logger
+from proxy_creator_utils import strip_first_3d
 from PySide6.QtCore import QProcess
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -66,6 +68,8 @@ class MainWindow(QWidget):
         # instance variables shared across methods
         self.filepaths: list[str] = []
         self.proxy_folder: str = ""
+        self.smooth_normals: bool = True
+        self.tex_res: str = "2K"
 
         self.setWindowTitle("Megascans to Arnold Proxy")
         self.resize(800, 600)
@@ -74,6 +78,8 @@ class MainWindow(QWidget):
         main_layout = QVBoxLayout(self)
         folder_layout = QHBoxLayout()
         addremove_layout = QHBoxLayout()
+        export_folder_layout = QHBoxLayout()
+        action_layout = QHBoxLayout()
 
         self.tex_res_combo = QComboBox()
         self.tex_res_combo.addItems(["2K", "4K"])
@@ -83,45 +89,63 @@ class MainWindow(QWidget):
         self.tex_ext_combo.addItems([".jpg", ".png"])
         folder_layout.addWidget(self.tex_ext_combo)
 
-        self.browse_btn = QPushButton("Select Folder")
-        self.browse_btn.clicked.connect(self.select_save_folder)
-        folder_layout.addWidget(self.browse_btn)
-
-        self.folder_line_edit = QLineEdit()
-        self.folder_line_edit.setReadOnly(True)
-        folder_layout.addWidget(self.folder_line_edit)
-
-        self.save_proxies_btn = QPushButton("Export Objects ->")
-        self.save_proxies_btn.clicked.connect(self.save_proxies_launch)
-        folder_layout.addWidget(self.save_proxies_btn)
+        self.smooth_normals_check = QCheckBox("Smooth Normals")
+        self.smooth_normals_check.setChecked(True)
+        folder_layout.addWidget(self.smooth_normals_check)
 
         main_layout.addLayout(folder_layout)
 
-        self.add_btn = QPushButton("Add File Paths")
+        self.add_btn = QPushButton("Add Selected Files (Windows Explorer)")
         self.add_btn.clicked.connect(self.add_selected_items_main)
         addremove_layout.addWidget(self.add_btn)
 
-        self.remove_btn = QPushButton("Remove File Paths")
+        self.remove_btn = QPushButton("Remove Selected")
         self.remove_btn.clicked.connect(self.remove_selected_items_main)
         addremove_layout.addWidget(self.remove_btn)
+
+        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn.clicked.connect(self.toggle_select_all_filepaths)
+        addremove_layout.addWidget(self.select_all_btn)
 
         main_layout.addLayout(addremove_layout)
 
         self.list_widget_main = QListWidget()
         self.list_widget_main.setSelectionMode(QListWidget.MultiSelection)
+        self.list_widget_main.itemSelectionChanged.connect(self.update_select_all_btn)
         main_layout.addWidget(self.list_widget_main)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         main_layout.addWidget(self.progress_bar)
 
-        self.import_proxies_btn = QPushButton("Import Proxies to Maya (Port 7001)")
+        self.folder_line_edit = QLineEdit()
+        self.folder_line_edit.setReadOnly(True)
+        export_folder_layout.addWidget(self.folder_line_edit)
+
+        self.browse_btn = QPushButton("Select Folder")
+        self.browse_btn.clicked.connect(self.select_save_folder)
+        export_folder_layout.addWidget(self.browse_btn)
+
+        main_layout.addLayout(export_folder_layout)
+
+        self.import_proxies_btn = QPushButton("Import All to Maya (Port 7001)")
         self.import_proxies_btn.clicked.connect(self.proxy_import_launch)
-        main_layout.addWidget(self.import_proxies_btn)
+        action_layout.addWidget(self.import_proxies_btn)
+
+        self.save_proxies_btn = QPushButton("Export All ->")
+        self.save_proxies_btn.clicked.connect(self.save_proxies_launch)
+        action_layout.addWidget(self.save_proxies_btn)
+
+        main_layout.addLayout(action_layout)
 
         self.add_selected_items_main()
         self.load_data()
         self.folder_line_edit.setText(self.proxy_folder)
+        self.smooth_normals_check.setChecked(self.smooth_normals)
+        self.smooth_normals_check.toggled.connect(self.on_smooth_normals_toggled)
+        if self.tex_res_combo.findText(self.tex_res) >= 0:
+            self.tex_res_combo.setCurrentText(self.tex_res)
+        self.tex_res_combo.currentTextChanged.connect(self.on_tex_res_changed)
 
     # ------------------------- DATA FILE (filepaths + metadata) -------------------------#
     def load_data(self) -> None:
@@ -130,26 +154,73 @@ class MainWindow(QWidget):
             with open(DATA_FILE) as f:
                 data = json.load(f)
         except FileNotFoundError:
-            data = {"filepaths": [], "proxy_folder_path": ""}
+            data = {
+                "filepaths": [],
+                "proxy_folder_path": "",
+                "smooth_normals": True,
+                "tex_res": "2K",
+            }
             with open(DATA_FILE, "w") as f:
                 json.dump(data, f, indent=4)
 
         self.filepaths = data.get("filepaths", [])
         self.proxy_folder = data.get("proxy_folder_path", "")
+        if "smooth_normals" not in data:
+            self.smooth_normals = True
+            self.save_data()
+        else:
+            self.smooth_normals = bool(data["smooth_normals"])
+        self.tex_res = data.get("tex_res", "2K")
+        if self.tex_res not in ("2K", "4K"):
+            self.tex_res = "2K"
 
     def save_data(self) -> None:
         """Save self.filepaths and self.proxy_folder to the combined data file."""
         with open(DATA_FILE, "w") as f:
             json.dump(
-                {"filepaths": self.filepaths, "proxy_folder_path": self.proxy_folder},
+                {
+                    "filepaths": self.filepaths,
+                    "proxy_folder_path": self.proxy_folder,
+                    "smooth_normals": self.smooth_normals,
+                    "tex_res": self.tex_res,
+                },
                 f,
                 indent=4,
             )
+
+    def on_smooth_normals_toggled(self, checked: bool) -> None:
+        """Persist the Smooth Normals toggle."""
+        self.smooth_normals = checked
+        self.save_data()
+
+    def on_tex_res_changed(self, text: str) -> None:
+        """Persist the texture resolution combo."""
+        self.tex_res = text
+        self.save_data()
 
     def refresh_list_widget(self) -> None:
         """Sync the list widget display with self.filepaths."""
         self.list_widget_main.clear()
         self.list_widget_main.addItems(self.filepaths)
+        self.update_select_all_btn()
+
+    def toggle_select_all_filepaths(self) -> None:
+        """Select or deselect all filepaths in the list."""
+        if self.list_widget_main.count() == 0:
+            return
+        if len(self.list_widget_main.selectedItems()) == self.list_widget_main.count():
+            self.list_widget_main.clearSelection()
+        else:
+            self.list_widget_main.selectAll()
+
+    def update_select_all_btn(self) -> None:
+        """Switch the button label between Select All and Deselect All."""
+        all_selected = (
+            self.list_widget_main.count() > 0
+            and len(self.list_widget_main.selectedItems())
+            == self.list_widget_main.count()
+        )
+        self.select_all_btn.setText("Deselect All" if all_selected else "Select All")
 
     # ------------------------- MAIN LIST ITEMS -------------------------#
     def add_selected_items_main(self) -> None:
@@ -211,9 +282,9 @@ class MainWindow(QWidget):
             fbxobj_stem = fbxobj_path.stem
             lod_suffix = f"_{fbxobj_stem.split('_')[-1]}"
             base_name = fbxobj_stem.replace(lod_suffix, "")
-            parent_folder_name = re.sub(r"\s+", "", fbxobj_path.parent.name)
-            if parent_folder_name[0].isdigit():
-                parent_folder_name = parent_folder_name.replace("3d_", "")
+            parent_folder_name = strip_first_3d(
+                re.sub(r"\s+", "", fbxobj_path.parent.name),
+            )
 
             item_proxy_folder = Path(self.proxy_folder) / parent_folder_name
             item_proxy_folder.mkdir(parents=True, exist_ok=True)
@@ -297,6 +368,7 @@ class MainWindow(QWidget):
     def save_proxies_launch(self) -> None:
         """Copy images over and export proxies to the save folder."""
         self.progress_bar.setValue(0)
+        self.save_data()
         self.save_proxies_btn.setEnabled(False)
         self.run_with_progress(self.copy_images_over, 50)
         self.run_with_progress(self.create_proxy_cmd, 100)

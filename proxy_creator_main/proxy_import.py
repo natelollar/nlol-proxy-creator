@@ -1,4 +1,3 @@
-import re
 from pathlib import Path
 
 from maya import cmds
@@ -28,37 +27,29 @@ def import_proxy(filepaths: list[str]) -> None:
                 f'Needs ".ass" extension or does not exist. Skipped: {filepath}',
             )
 
-    for filepath in arnold_proxy_filepaths:
-        file_name = Path(filepath).stem
-        mesh_version = file_name.split('_')[-1]
-        if re.match(r"v\d{2}$", mesh_version):  # v01
-            mesh_version = f"_{mesh_version}"
+    if not cmds.pluginInfo("mtoa", q=True, loaded=True):
+        cmds.loadPlugin("mtoa")
+
+    for i, filepath in enumerate(arnold_proxy_filepaths):
+        object_name = filepath.stem
+        if "aistandin" in object_name.lower():
+            standin_name = object_name
         else:
-            mesh_version = ""
-        file_base_name = file_name.replace(mesh_version, "")
-        base_name_stripped = file_base_name.split("_")
-        base_name_stripped = [
-            re.sub(r"\s+", "", (txt[0].upper() + txt[1:]))
-            for txt in base_name_stripped
-            if txt
-        ]
-        base_name_stripped = "".join(base_name_stripped)
-        if base_name_stripped[0].isdigit():
-            base_name_stripped = base_name_stripped.replace("3d_", "")
-
-        standin_suffix = "_aiStandIn"
-        standin_name = f"{base_name_stripped}{mesh_version}{standin_suffix}"
-        standin = cmds.createNode(
-            "aiStandIn",
-            name=f"{standin_name}Shape",
-        )
-        cmds.select(standin)
-        cmds.pickWalk(d="up")
-        cmds.rename(f"{standin_name}")  # rename standIn transform
-        cmds.setAttr(f"{standin}.dso", filepath, type="string")
-        cmds.setAttr(f"{standin}.mode", 3)
-
-
-def import_proxy_test() -> None:
-    """Test."""
-    logger.info("----- THIS IS A TEST! -----")
+            standin_name = f"{object_name}AiStandIn"
+        if cmds.objExists(standin_name):
+            logger.info(f'Already exists: "{standin_name}". Reloading filepath...')
+            standin_shape = cmds.listRelatives(standin_name, shapes=True)[0]
+            cmds.setAttr(f"{standin_shape}.dso", str(filepath), type="string")
+            cmds.dgdirty(standin_shape)
+            if i == len(arnold_proxy_filepaths) - 1:
+                logger.info("Refreshing scene...")
+                cmds.refresh(force=True)
+        else:
+            standin_shape = cmds.createNode(
+                "aiStandIn",
+                name=f"{standin_name}Shape",
+            )
+            standin_transform = cmds.listRelatives(standin_shape, parent=True)[0]
+            cmds.rename(standin_transform, standin_name)
+            cmds.setAttr(f"{standin_shape}.dso", str(filepath), type="string")
+            cmds.setAttr(f"{standin_shape}.mode", 3)

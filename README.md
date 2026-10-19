@@ -1,7 +1,7 @@
 # nlol-proxy-creator
 ### Quickly Create Arnold Proxies
 - Currently, exports megascan environment assets to folder as arnold proxies (.ass).  
-    - Imports arnold proxies into Maya and renames with nice names.
+    - Imports arnold proxies into Maya as standins named from the filename plus `AiStandIn`.
 - May support USD at a future date.
 ----------
 

@@ -10,6 +10,14 @@ if parent not in sys.path:
 
 from maya import cmds
 
+from proxy_creator_main.proxy_creator_utils import (
+    cap,
+    lowercase,
+    mesh_version_from_name,
+    mesh_versions_from_indices,
+    prefer_res_filepaths,
+    strip_first_3d,
+)
 from proxy_creator_main.proxy_creator_logger import get_logger
 
 logger = get_logger()
@@ -23,6 +31,8 @@ class CreateArnoldProxy:
     def __init__(self) -> None:
         self.filepaths: list[str] = []
         self.proxy_folder: str = ""
+        self.smooth_normals: bool = True
+        self.tex_res: str = "2K"
 
     # ------------------------- LAUNCH -------------------------#
     def create_proxy_launch(self) -> None:
@@ -60,6 +70,8 @@ class CreateArnoldProxy:
 
         self.filepaths = data.get("filepaths", [])
         self.proxy_folder = data.get("proxy_folder_path", "")
+        self.smooth_normals = data.get("smooth_normals", True)
+        self.tex_res = data.get("tex_res", "2K")
 
     # ------------------------- CREATE PROXY -------------------------#
     def create_proxy(self, fbxobj_filepath: str) -> None:
@@ -72,14 +84,12 @@ class CreateArnoldProxy:
         self.fbxobj_stem = Path(fbxobj_filepath).stem
         self.lod_suffix = f"_{self.fbxobj_stem.split('_')[-1]}"
         self.prnt_folder_name = re.sub(r"\s+", "", Path(fbxobj_filepath).parent.name)
-        if self.prnt_folder_name[0].isdigit():
-            self.prnt_folder_name = self.prnt_folder_name.replace("3d_", "")
-        self.prnt_folder_name_lod = f"{self.prnt_folder_name}{self.lod_suffix}"
-        self.prnt_name_stripped = self.prnt_folder_name.split("_")
-        self.prnt_name_stripped = [
-            self.cap(txt) for txt in self.prnt_name_stripped if txt
-        ]
-        self.prnt_name_stripped = "".join(self.prnt_name_stripped)
+        self.prnt_folder_name = strip_first_3d(self.prnt_folder_name)
+        tokens = [txt for txt in self.prnt_folder_name.split("_") if txt]
+        if tokens:
+            tokens[0] = lowercase(tokens[0])
+            tokens[1:] = [cap(txt) for txt in tokens[1:]]
+        self.prnt_name_stripped = "".join(tokens)
         self.prnt_name_stripped_lod = f"{self.prnt_name_stripped}{self.lod_suffix}"
 
         cmds.file(new=True, force=True)
@@ -89,7 +99,8 @@ class CreateArnoldProxy:
         self.create_texture_nodes()
         self.create_material()
         self.assign_material()
-        self.reset_soften_normals()
+        if self.smooth_normals:
+            self.reset_soften_normals()
         self.export_proxy()
         self.save_maya_file()
 
@@ -115,34 +126,43 @@ class CreateArnoldProxy:
 
     def rename_objects(self) -> None:
         """Rename import mesh objects."""
-        imported_meshes = [
-            nd for nd in self.imported_nodes if cmds.objectType(nd) == "mesh"
-        ]
-        imported_meshes = [
-            cmds.listRelatives(nd, parent=True)[0] for nd in imported_meshes
-        ]
-        imported_meshes = list(set(imported_meshes))
+        imported_meshes = []
+        for nd in self.imported_nodes:
+            if cmds.objectType(nd) != "mesh":
+                continue
+            parent = cmds.listRelatives(nd, parent=True)
+            if parent and parent[0] not in imported_meshes:
+                imported_meshes.append(parent[0])
+        imported_meshes = cmds.ls(imported_meshes) or imported_meshes
 
         self.scene_meshes = []
         if len(imported_meshes) == 1:
             mesh = cmds.rename(imported_meshes[0], f"{self.prnt_name_stripped_lod}_geo")
             self.scene_meshes.append(mesh)
+            return
+
+        indices = [
+            mesh_version_from_name(mesh, self.lod_suffix) for mesh in imported_meshes
+        ]
+        if None in indices:
+            logger.info("Mesh version not in name. Using outliner order.")
+            versions = [f"v{i:02d}" for i in range(1, len(imported_meshes) + 1)]
         else:
-            for i, mesh in enumerate(imported_meshes, 1):
-                mesh = cmds.rename(
-                    mesh,
-                    f"{self.prnt_name_stripped}{self.lod_suffix}v{i:02d}_geo",
-                )
-                self.scene_meshes.append(mesh)
+            versions = mesh_versions_from_indices(indices)
+
+        for mesh, version in zip(imported_meshes, versions):
+            mesh = cmds.rename(
+                mesh,
+                f"{self.prnt_name_stripped}{self.lod_suffix}{version}_geo",
+            )
+            self.scene_meshes.append(mesh)
 
     def create_texture_nodes(self):
         """Find texture files in the proxy folder and create Maya file texture nodes."""
         tex_folder = Path(self.proxy_folder) / self.prnt_folder_name
 
-        color_filepath = None
-        roughness_filepath = None
-        color_name = ""
-        roughness_name = ""
+        color_candidates = []
+        roughness_candidates = []
         normal_candidates = []
 
         for filepath in tex_folder.iterdir():
@@ -150,13 +170,20 @@ class CreateArnoldProxy:
                 continue
             stem = filepath.stem
             if "_Albedo" in stem:
-                color_filepath = filepath
-                color_name = f"{self.prnt_name_stripped}Albedo"
+                color_candidates.append(filepath)
             elif "_Roughness" in stem:
-                roughness_filepath = filepath
-                roughness_name = f"{self.prnt_name_stripped}Roughness"
+                roughness_candidates.append(filepath)
             elif "_Normal" in stem:
                 normal_candidates.append(filepath)
+
+        color_candidates = prefer_res_filepaths(color_candidates, self.tex_res)
+        roughness_candidates = prefer_res_filepaths(roughness_candidates, self.tex_res)
+        normal_candidates = prefer_res_filepaths(normal_candidates, self.tex_res)
+
+        color_filepath = color_candidates[0] if color_candidates else None
+        roughness_filepath = roughness_candidates[0] if roughness_candidates else None
+        color_name = f"{self.prnt_name_stripped}Albedo"
+        roughness_name = f"{self.prnt_name_stripped}Roughness"
 
         # prefer lod-specific normal, then generic, then first available
         normal_filepath = (
@@ -165,9 +192,13 @@ class CreateArnoldProxy:
                 (fp for fp in normal_candidates if self.lod_suffix not in fp.name),
                 None,
             )
-            or normal_candidates[0]
+            or (normal_candidates[0] if normal_candidates else None)
         )
         normal_name = f"{self.prnt_name_stripped}Normal"
+        logger.info(
+            f"Textures ({self.tex_res}): {color_filepath}, "
+            f"{roughness_filepath}, {normal_filepath}"
+        )
 
         self.create_2dplace_node()
         color_node = self.create_texture_node(color_name, color_filepath)
@@ -305,7 +336,7 @@ class CreateArnoldProxy:
         """Assign a material to mesh objects in the scene."""
         for mesh in self.scene_meshes:
             cmds.hyperShade(geometries=mesh, assign=self.openpbr_mat)
-            logger.info(f"Assigend material: {self.openpbr_mat} ->  {mesh}")
+            logger.info(f"Assigned material: {self.openpbr_mat} ->  {mesh}")
 
     def reset_soften_normals(self) -> None:
         """Reset normals to face normals and apply 180-degree softening on all meshes in the scene."""
@@ -318,20 +349,11 @@ class CreateArnoldProxy:
 
     def export_proxy(self) -> None:
         """Export each mesh in the scene as an Arnold .ass proxy file to self.proxy_folder."""
-        if len(self.scene_meshes) == 1:
-            export_filepath = (
-                Path(self.proxy_folder) / f"{self.prnt_folder_name}.ass"
-            )
-            cmds.arnoldExportAss(self.scene_meshes, filename=export_filepath)
-        else:
-            for i, mesh in enumerate(self.scene_meshes, 1):
-                export_filepath = (
-                    Path(self.proxy_folder)
-                    / f"{self.prnt_folder_name}_v{i:02d}.ass"
-                )
-                cmds.select(clear=True)
-                cmds.select(mesh)
-                cmds.arnoldExportAss(filename=export_filepath, selected=True)
+        for mesh in self.scene_meshes:
+            export_filepath = Path(self.proxy_folder) / f"{mesh}.ass"
+            cmds.select(clear=True)
+            cmds.select(mesh)
+            cmds.arnoldExportAss(filename=export_filepath, selected=True)
         logger.info(f"Exported proxy: {self.scene_meshes}")
 
     def save_maya_file(self) -> None:
@@ -339,14 +361,10 @@ class CreateArnoldProxy:
         save_path = (
             Path(self.proxy_folder)
             / self.prnt_folder_name
-            / f"{self.prnt_folder_name_lod}.ma"
+            / f"{self.prnt_name_stripped_lod}_geo.ma"
         )
         cmds.file(rename=save_path)
         cmds.file(save=True, type="mayaAscii")
-
-    def cap(self, text: str) -> str:
-        """Capitalize only first letter in a string."""
-        return text[0].upper() + text[1:] if text else text
 
 
 if __name__ == "__main__":
